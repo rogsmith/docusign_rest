@@ -470,6 +470,47 @@ module DocusignRest
       ios
     end
 
+    def create_file_ios_with_document_id(files)
+      # UploadIO is from the multipart-post gem's lib/composite_io.rb:57
+      # where it has this documentation:
+      #
+      # ********************************************************************
+      # Create an upload IO suitable for including in the params hash of a
+      # Net::HTTP::Post::Multipart.
+      #
+      # Can take two forms. The first accepts a filename and content type, and
+      # opens the file for reading (to be closed by finalizer).
+      #
+      # The second accepts an already-open IO, but also requires a third argument,
+      # the filename from which it was opened (particularly useful/recommended if
+      # uploading directly from a form in a framework, which often save the file to
+      # an arbitrarily named RackMultipart file in /tmp).
+      #
+      # Usage:
+      #
+      #     UploadIO.new('file.txt', 'text/plain')
+      #     UploadIO.new(file_io, 'text/plain', 'file.txt')
+      # ********************************************************************
+      #
+      # There is also a 4th undocumented argument, opts={}, which allows us
+      # to send in not only the Content-Disposition of 'file' as required by
+      # DocuSign, but also the documentId parameter which is required as well
+      #
+      ios = []
+      files.each do |file|
+        ios << {
+                 document_id: file[:document_id],
+                 io: UploadIO.new(
+                     file[:io] || file[:path],
+                     file[:content_type] || 'application/pdf',
+                     file[:name],
+                     'Content-Disposition' => "file; documentid=#{file[:document_id]}"
+                   )
+                }
+      end
+      ios
+    end
+
 
     # Internal: sets up the file_params for inclusion in a multipart post request
     #
@@ -482,6 +523,15 @@ module DocusignRest
       file_params = {}
       ios.each_with_index do |io,index|
         file_params.merge!("file#{index + 1}" => io)
+      end
+      file_params
+    end
+
+    def create_file_params_with_document_id(ios)
+      # multi-doc uploading capabilities, each doc needs to be it's own param
+      file_params = {}
+      ios.each do |io|
+        file_params.merge!("file#{io[:document_id]}" => io[:io])
       end
       file_params
     end
@@ -521,6 +571,23 @@ module DocusignRest
       composite_array
     end
 
+    def get_composite_template2(server_templates, signers, files)
+      composite_array = []
+      index = 0
+      server_templates.each  do |server_template|
+        document_hash = Hash[:documentId, files[index][:document_id], \
+          :name, files[index][:name]]
+        server_template_hash = Hash[:sequence, server_template[:sequence], \
+          :templateId, server_template[:template_id]]
+        templates_hash = Hash[:serverTemplates, [server_template_hash], \
+          :inlineTemplates,  get_inline_signers(signers, index += 1), \
+          :document, document_hash]
+
+        composite_array << templates_hash
+      end
+      composite_array
+    end
+
 
     # Internal: takes signer info and the inline template sequence number
     # and sets up the inline template
@@ -529,12 +596,23 @@ module DocusignRest
     def get_inline_signers(signers, sequence)
       signers_array = []
       signers.each do |signer|
-        signers_hash = Hash[:email, signer[:email], :name, signer[:name], \
-          :recipientId, signer[:recipient_id], :roleName, signer[:role_name], \
-          :clientUserId, signer[:client_id] || signer[:email]]
+        signers_hash = {
+          email: signer[:email],
+          name: signer[:name],
+          recipientId: signer[:recipient_id],
+          roleName: signer[:role_name],
+          clientUserId: signer[:client_id] || signer[:email],
+          tabs: {
+            textTabs:     get_signer_tabs(signer[:text_tabs]),
+            checkboxTabs: get_signer_tabs(signer[:checkbox_tabs]),
+            numberTabs:   get_signer_tabs(signer[:number_tabs]),
+            fullNameTabs: get_signer_tabs(signer[:fullname_tabs]),
+            dateTabs:     get_signer_tabs(signer[:date_tabs])
+          }
+        }
         signers_array << signers_hash
       end
-      template_hash = Hash[:sequence, sequence, :recipients, { signers: signers_array } ]
+      template_hash = {sequence: sequence, recipients: { signers: signers_array }}
       [template_hash]
     end
 
@@ -797,6 +875,34 @@ module DocusignRest
       JSON.parse(response.body)
     end
 
+    def create_envelope_from_composite_template2(options={})
+      ios = create_file_ios_with_document_id(options[:files])
+      file_params = create_file_params_with_document_id(ios)
+
+      content_type = { 'Content-Type' => 'application/json' }
+      content_type.merge(options[:headers]) if options[:headers]
+
+      post_body = {
+        status:             options[:status],
+        emailBlurb:         options[:email][:body],
+        emailSubject:       options[:email][:subject],
+        eventNotification:  get_event_notification(options[:event_notification]),
+        compositeTemplates: get_composite_template2(options[:server_templates], options[:signers], options[:files])
+      }.to_json
+
+      puts post_body
+
+      uri = build_uri("/accounts/#{acct_id}/envelopes")
+
+      http = initialize_net_http_ssl(uri)
+
+      request = initialize_net_http_multipart_post_request(
+                  uri, post_body, file_params, headers(options[:headers])
+                )
+      response = http.request(request)
+      JSON.parse(response.body)
+    end
+
 
     # Public returns the names specified for a given email address (existing docusign user)
     #
@@ -1005,6 +1111,19 @@ module DocusignRest
       content_type.merge(options[:headers]) if options[:headers]
 
       uri = build_uri("/accounts/#{acct_id}/envelopes/#{options[:envelope_id]}/documents")
+
+      http     = initialize_net_http_ssl(uri)
+      request  = Net::HTTP::Get.new(uri.request_uri, headers(content_type))
+      response = http.request(request)
+
+      JSON.parse(response.body)
+    end
+
+    def get_documents_from_template(options={})
+      content_type = { 'Content-Type' => 'application/json' }
+      content_type.merge(options[:headers]) if options[:headers]
+
+      uri = build_uri("/accounts/#{acct_id}/templates/#{options[:template_id]}/documents")
 
       http     = initialize_net_http_ssl(uri)
       request  = Net::HTTP::Get.new(uri.request_uri, headers(content_type))
