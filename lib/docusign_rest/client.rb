@@ -1136,7 +1136,7 @@ module DocusignRest
       content_type = { 'Content-Type' => 'application/json' }
       content_type.merge(options[:headers]) if options[:headers]
 
-      uri = build_uri("/accounts/#{acct_id}/templates/#{options[:template_id]}/documents/#{options[:document_id]}")
+      uri = build_uri("/accounts/#{acct_id}/templates/#{options[:envelope_id]}/documents/#{options[:document_id]}")
 
       http = initialize_net_http_ssl(uri)
       request = Net::HTTP::Get.new(uri.request_uri, headers(content_type))
