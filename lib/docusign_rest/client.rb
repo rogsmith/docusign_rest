@@ -1132,6 +1132,27 @@ module DocusignRest
       JSON.parse(response.body)
     end
 
+    def get_document_from_template(options={})
+      content_type = { 'Content-Type' => 'application/json' }
+      content_type.merge(options[:headers]) if options[:headers]
+
+      uri = build_uri("/accounts/#{acct_id}/templates/#{options[:template_id]}/documents/#{options[:document_id]}")
+
+      http = initialize_net_http_ssl(uri)
+      request = Net::HTTP::Get.new(uri.request_uri, headers(content_type))
+      response = http.request(request)
+      return response.body if options[:return_stream]
+
+      split_path = options[:local_save_path].split('/')
+      split_path.pop #removes the document name and extension from the array
+      path = split_path.join("/") #rejoins the array to form path to the folder that will contain the file
+
+      FileUtils.mkdir_p(path)
+      File.open(options[:local_save_path], 'wb') do |output|
+        output << response.body
+      end
+    end
+
 
     # Public retrieves a PDF containing the combined content of all
     # documents and the certificate for the given envelope.
